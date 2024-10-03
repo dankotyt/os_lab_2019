@@ -5,15 +5,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
+#include <signal.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-
 #include <getopt.h>
-
 #include "find_min_max.h"
 #include "utils.h"
+
+int timeout = 0; // Таймаут по умолчанию
+
+void kill_children(pid_t *child_pids, int pnum) {
+    for (int i = 0; i < pnum; i++) {
+        if (child_pids[i] > 0) {
+            kill(child_pids[i], SIGKILL);
+        }
+    }
+}
+
+void timeout_handler(int signum) {
+    printf("Timeout reached, killing child processes...\n");
+    exit(1);
+}
 
 int main(int argc, char **argv) {
     int seed = -1;
@@ -29,6 +42,7 @@ int main(int argc, char **argv) {
             {"array_size", required_argument, 0, 0},
             {"pnum", required_argument, 0, 0},
             {"by_files", no_argument, 0, 'f'},
+            {"timeout", required_argument, 0, 0},
             {0, 0, 0, 0}
         };
 
@@ -38,44 +52,51 @@ int main(int argc, char **argv) {
         if (c == -1) break;
 
         switch (c) {
-              case 0:
-                  switch (option_index) {
-                      case 0: // seed
-                          seed = atoi(optarg);
-                          if (seed <= 0) {
-                              fprintf(stderr, "Error: seed must be a positive number.\n");
-                              return 1;
-                          }
-                          break;
-                      case 1: // array_size
-                          array_size = atoi(optarg);
-                          if (array_size <= 0) {
-                              fprintf(stderr, "Error: array_size must be a positive number.\n");
-                              return 1;
-                          }
-                          break;
-                      case 2: // pnum
-                          pnum = atoi(optarg);
-                          if (pnum <= 0) {
-                              fprintf(stderr, "Error: pnum must be a positive number.\n");
-                              return 1;
-                          }
-                          break;
-                      case 3: // by_files
-                          with_files = true;
-                          break;
-                      default:
-                          printf("Index %d is out of options\n", option_index);
-                  }
-                  break;
-              case 'f':
-                  with_files = true;
-                  break;
-              case '?':
-                  break;
-              default:
-                  printf("getopt returned character code 0%o?\n", c);
-          }
+            case 0:
+                switch (option_index) {
+                    case 0: // seed
+                        seed = atoi(optarg);
+                        if (seed <= 0) {
+                            fprintf(stderr, "Error: seed must be a positive number.\n");
+                            return 1;
+                        }
+                        break;
+                    case 1: // array_size
+                        array_size = atoi(optarg);
+                        if (array_size <= 0) {
+                            fprintf(stderr, "Error: array_size must be a positive number.\n");
+                            return 1;
+                        }
+                        break;
+                    case 2: // pnum
+                        pnum = atoi(optarg);
+                        if (pnum <= 0) {
+                            fprintf(stderr, "Error: pnum must be a positive number.\n");
+                            return 1;
+                        }
+                        break;
+                    case 3: // by_files
+                        with_files = true;
+                        break;
+                    case 4: // timeout
+                        timeout = atoi(optarg);
+                        if (timeout <= 0) {
+                            fprintf(stderr, "Error: timeout must be a positive number.\n");
+                            return 1;
+                        }
+                        break;
+                    default:
+                        printf("Index %d is out of options\n", option_index);
+                }
+                break;
+            case 'f':
+                with_files = true;
+                break;
+            case '?':
+                break;
+            default:
+                printf("getopt returned character code 0%o?\n", c);
+        }
     }
 
     if (optind < argc) {
@@ -106,6 +127,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    pid_t child_pids[pnum];
+
     for (int i = 0; i < pnum; i++) {
         pid_t child_pid = fork();
         if (child_pid >= 0) {
@@ -133,6 +156,8 @@ int main(int argc, char **argv) {
                 }
                 free(array);
                 exit(0);
+            } else {
+                child_pids[i] = child_pid;
             }
         } else {
             printf("Fork failed!\n");
@@ -140,9 +165,21 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (timeout > 0) {
+        signal(SIGALRM, timeout_handler);
+        ualarm(timeout * 1000, 0);
+    }
+
     while (active_child_processes > 0) {
-        wait(NULL);
-        active_child_processes -= 1;
+        int status;
+        pid_t pid = wait(&status);
+        if (pid > 0) {
+            active_child_processes -= 1;
+        }
+    }
+
+    if (timeout > 0) {
+        ualarm(0, 0); // Отключаем таймер, если все дочерние процессы завершились до истечения таймаута
     }
 
     struct MinMax min_max;
